@@ -417,7 +417,7 @@ abstract class CommandBase extends Command implements LoggerAwareInterface
      *
      * @throws \Acquia\Cli\Exception\AcquiaCliException
      */
-    private function promptChooseApplication(
+    protected function promptChooseApplication(
         Client $acquiaCloudClient
     ): object|array|null {
         $applicationsResource = new Applications($acquiaCloudClient);
@@ -912,7 +912,7 @@ abstract class CommandBase extends Command implements LoggerAwareInterface
     /**
      * @throws \Acquia\Cli\Exception\AcquiaCliException
      */
-    private function promptChooseEnvironmentConsiderProd(Client $acquiaCloudClient, string $applicationUuid, bool $allowProduction, bool $allowNode): EnvironmentResponse
+    protected function promptChooseEnvironmentConsiderProd(Client $acquiaCloudClient, string $applicationUuid, bool $allowProduction, bool $allowNode): EnvironmentResponse
     {
         $environmentResource = new Environments($acquiaCloudClient);
         $applicationEnvironments = iterator_to_array($environmentResource->getAll($applicationUuid));
@@ -2449,6 +2449,42 @@ abstract class CommandBase extends Command implements LoggerAwareInterface
                 throw new AcquiaCliException('This machine is not yet authenticated with Site Factory.');
             }
             throw new AcquiaCliException('This machine is not yet authenticated with the Cloud Platform.');
+        }
+    }
+
+    /**
+     * Poll an API until $check returns a non-null value.
+     *
+     * @param callable(): mixed $check
+     * @throws \Acquia\Cli\Exception\AcquiaCliException On timeout.
+     */
+    protected function pollCloud(callable $check, string $waitingMessage, string $timeoutMessage): mixed
+    {
+        $timeout = is_numeric(getenv('ACLI_TRIAL_TIMEOUT')) ? (int) getenv('ACLI_TRIAL_TIMEOUT') : 1800;
+        $start = time();
+        // ponytail: dumb sleep loop instead of LoopHelper — its 45-minute
+        // watchdog is hard-coded and untestable, and it cannot distinguish
+        // timeout from success.
+        $delay = 1;
+        $lastNote = null;
+        while (true) {
+            $result = $check();
+            if ($result !== null) {
+                return $result;
+            }
+            if (time() - $start >= $timeout) {
+                throw new AcquiaCliException($timeoutMessage);
+            }
+            if ($lastNote === null) {
+                $this->io->writeln($waitingMessage);
+                $this->io->writeln('Press Ctrl+C to stop waiting — re-running the command resumes where you left off.');
+                $lastNote = time();
+            } elseif (time() - $lastNote >= 60) {
+                $this->io->writeln(sprintf('Still waiting (%d minute(s) elapsed)...', intdiv(time() - $start, 60)));
+                $lastNote = time();
+            }
+            sleep($delay);
+            $delay = min($delay * 2, 30);
         }
     }
 
