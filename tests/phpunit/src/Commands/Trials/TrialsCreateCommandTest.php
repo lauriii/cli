@@ -76,7 +76,11 @@ class TrialsCreateCommandTest extends CommandTestBase
 
     private function mockTrialsToken(): void
     {
-        $this->httpClientProphecy->request('POST', ConnectorInterface::URL_ACCESS_TOKEN, Argument::any())
+        $this->httpClientProphecy->request('POST', ConnectorInterface::URL_ACCESS_TOKEN, Argument::that(static function (array $options): bool {
+            return ($options['form_params']['grant_type'] ?? null) === 'client_credentials'
+                && isset($options['form_params']['client_id'], $options['form_params']['client_secret'])
+                && $options['http_errors'] === false;
+        }))
             ->willReturn(self::response(200, ['access_token' => 'trials-token']));
     }
 
@@ -91,7 +95,8 @@ class TrialsCreateCommandTest extends CommandTestBase
                 'region' => 'us-east-1',
                 'site_name' => 'mysite',
                 'site_template_id' => 'drupal_cms_starter',
-            ] && $options['headers']['Authorization'] === 'Bearer trials-token';
+            ] && $options['headers']['Authorization'] === 'Bearer trials-token'
+                && $options['http_errors'] === false;
         }))
             ->willReturn(self::response(200, self::trial([
                 'percent_complete' => 14,
@@ -270,7 +275,10 @@ class TrialsCreateCommandTest extends CommandTestBase
                 self::response(200, ['access_token' => 'fresh-token'])
             )
             ->shouldBeCalled();
-        $this->httpClientProphecy->request('GET', self::$trialsUrl . '/api/trials', Argument::any())
+        // Both the stale and the fresh token must be sent as Bearer headers.
+        $this->httpClientProphecy->request('GET', self::$trialsUrl . '/api/trials', Argument::that(static function (array $options): bool {
+            return in_array($options['headers']['Authorization'], ['Bearer expired-token', 'Bearer fresh-token'], true);
+        }))
             ->willReturn(
                 self::response(401, ['error' => 'The access token has expired.']),
                 self::response(200, self::trial())
@@ -283,14 +291,40 @@ class TrialsCreateCommandTest extends CommandTestBase
         $this->assertStringContainsString('Your account already has a trial.', $this->getDisplay());
     }
 
+    /**
+     * Service errors surface the message field when present, falling back to
+     * the error field and then the raw body.
+     */
     public function testTrialsServiceError(): void
     {
         $this->mockTrialsToken();
         $this->httpClientProphecy->request('GET', self::$trialsUrl . '/api/trials', Argument::any())
-            ->willReturn(self::response(500, ['message' => 'Internal server error']))
+            ->willReturn(self::response(400, ['message' => 'Bad request']))
             ->shouldBeCalled();
         $this->expectException(AcquiaCliException::class);
-        $this->expectExceptionMessage('Trials service error (HTTP 500): Internal server error');
+        $this->expectExceptionMessage('Trials service error (HTTP 400): Bad request');
+        $this->executeCommand([], [], OutputInterface::VERBOSITY_NORMAL, false);
+    }
+
+    public function testTrialsServiceErrorWithoutMessage(): void
+    {
+        $this->mockTrialsToken();
+        $this->httpClientProphecy->request('GET', self::$trialsUrl . '/api/trials', Argument::any())
+            ->willReturn(self::response(403, ['error' => 'Forbidden']))
+            ->shouldBeCalled();
+        $this->expectException(AcquiaCliException::class);
+        $this->expectExceptionMessage('Trials service error (HTTP 403): Forbidden');
+        $this->executeCommand([], [], OutputInterface::VERBOSITY_NORMAL, false);
+    }
+
+    public function testTrialsServiceErrorWithNonJsonBody(): void
+    {
+        $this->mockTrialsToken();
+        $this->httpClientProphecy->request('GET', self::$trialsUrl . '/api/trials', Argument::any())
+            ->willReturn(new Response(502, [], 'Bad gateway'))
+            ->shouldBeCalled();
+        $this->expectException(AcquiaCliException::class);
+        $this->expectExceptionMessage('Trials service error (HTTP 502): Bad gateway');
         $this->executeCommand([], [], OutputInterface::VERBOSITY_NORMAL, false);
     }
 

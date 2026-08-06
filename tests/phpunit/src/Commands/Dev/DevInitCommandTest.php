@@ -443,6 +443,7 @@ class DevInitCommandTest extends PullCommandTestBase
                 'Prerequisites: git, Docker, and ddev',
                 'If your account has no applications yet',
                 'Every step is skipped automatically',
+                'Use <info>acli dev:start</info> and <info>acli dev:stop</info>',
                 'For non-interactive use',
             ] as $paragraph
         ) {
