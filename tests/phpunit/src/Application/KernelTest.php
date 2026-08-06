@@ -116,6 +116,8 @@ EOD;
   ssh-key:info             Print information about an SSH key
   ssh-key:list             List your local and remote SSH keys
   ssh-key:upload           Upload a local SSH key to the Cloud Platform
+ trials
+  trials:create            [trial:create] Create a free Acquia Cloud Platform trial site
 
 EOD;
     }

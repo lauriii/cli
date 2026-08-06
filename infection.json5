@@ -17,7 +17,21 @@
             "\\$this->logger.*",
             // Cache TTLs only affect expiry timing, which is not observable in a
             // unit test without manipulating the clock.
-            ".*->expiresAfter\\(.*"
+            ".*->expiresAfter\\(.*",
+            // Poll pacing (sleep intervals, backoff, wall-clock timeout
+            // arithmetic) is likewise not observable without manipulating the
+            // clock.
+            ".*time\\(\\) - \\$\\w+ >= .*",
+            ".*sleep\\(\\$delay\\).*",
+            ".*\\$delay = .*",
+            ".*getenv\\('ACLI_TRIAL_TIMEOUT'\\).*",
+            // Reverting this to private would break only DevInitCommand's
+            // override dispatch, which DevInitCommandTest asserts — but the
+            // covering tests of this base line cannot be attributed to it.
+            ".*protected function promptChooseApplication.*",
+            // Removing this cast is behaviorally equivalent: PSR-7 streams
+            // are cast back to strings wherever the value is consumed.
+            ".*\\(string\\) \\$response->getBody\\(\\).*"
         ]
     },
     "timeout": 30,

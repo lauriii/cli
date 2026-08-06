@@ -7,8 +7,12 @@ namespace Acquia\Cli\Command\Dev;
 use Acquia\Cli\Command\Pull\PullCommandBase;
 use Acquia\Cli\Exception\AcquiaCliException;
 use Acquia\Cli\Helpers\SshCommandTrait;
+use AcquiaCloudApi\Connector\Client;
 use AcquiaCloudApi\Endpoints\Account;
+use AcquiaCloudApi\Endpoints\Applications;
+use AcquiaCloudApi\Endpoints\Environments;
 use AcquiaCloudApi\Endpoints\SshKeys;
+use AcquiaCloudApi\Response\ApplicationResponse;
 use AcquiaCloudApi\Response\EnvironmentResponse;
 use FilesystemIterator;
 use Symfony\Component\Console\Attribute\AsCommand;
@@ -26,14 +30,23 @@ final class DevInitCommand extends PullCommandBase
     use DevStackTrait;
     use SshCommandTrait;
 
+    /**
+     * Sentinel "uuid" for the create-a-new-application choice in the
+     * application picker. Real application UUIDs are UUID-formatted, so this
+     * cannot collide.
+     */
+    private const NEW_APPLICATION_CHOICE = 'new';
+
     protected function configure(): void
     {
         $this
             ->acceptEnvironmentId()
             ->addOption('dir', null, InputOption::VALUE_REQUIRED, 'The directory to clone the application into (defaults to ./<application name>)')
+            ->addOption('new', null, InputOption::VALUE_NONE, 'Create a new application with a free Acquia Cloud Platform trial instead of selecting an existing one')
             ->addUsage('myapp.dev --dir=./myapp --no-interaction')
             ->setHelp('This command takes you from nothing to a working local copy of an Acquia application: it authenticates with the Cloud Platform, helps you pick an application and environment, registers an SSH key if needed, clones your code, provisions a local stack with ddev, imports the database and files, and opens the site in your browser.'
                 . "\n\nPrerequisites: git, Docker, and ddev (the command checks for these and tells you how to install anything missing)."
+                . "\n\nIf your account has no applications yet — or you choose <info>Create a new application</info> from the application list, or pass <info>--new</info> — this command creates one for you with a free 14-day Acquia Cloud Platform trial (see <info>acli trials:create</info>), waits for the new application and its environments to be provisioned, and then continues automatically."
                 . "\n\nEvery step is skipped automatically if it is already done, so if setup fails partway you can fix the problem and re-run <info>acli dev:init</info> to resume where it left off."
                 . "\n\nUse <info>acli dev:start</info> and <info>acli dev:stop</info> for the daily start/stop loop; use ddev directly for everything else (drush, logs, ssh)."
                 . "\n\nFor non-interactive use (CI, scripts), pass the environment ID and credentials: <info>ACLI_KEY=... ACLI_SECRET=... acli dev:init myapp.dev --no-interaction</info>. This requires an SSH key already registered with the Cloud Platform.");
@@ -44,7 +57,7 @@ final class DevInitCommand extends PullCommandBase
         $this->io->writeln(["<options=bold>Let's get you a local development environment.</>", '']);
         $this->checkPrerequisites();
         $this->ensureAuthenticated($input, $output);
-        $environment = $this->determineEnvironment($input, $output);
+        $environment = $this->determineDevEnvironment($input, $output);
         $this->ensureSshKey($input, $output);
         $this->dir = $this->determineTargetDirectory($input, $environment);
         $this->ensureCode($environment, $output);
@@ -118,6 +131,144 @@ final class DevInitCommand extends PullCommandBase
         }
         $account = new Account($this->cloudApiClientService->getClient());
         $this->io->writeln('✓ Authenticated as <options=bold>' . $account->get()->mail . '</>');
+    }
+
+    /**
+     * Like determineEnvironment(), but when the account has no applications
+     * at all — or --new was passed — first creates one with a free trial,
+     * then waits for its environments to be provisioned.
+     *
+     * @throws \Acquia\Cli\Exception\AcquiaCliException
+     */
+    private function determineDevEnvironment(InputInterface $input, OutputInterface $output): array|string|EnvironmentResponse
+    {
+        $application = $this->maybeCreateTrialApplication($input);
+        if ($application === null) {
+            return $this->determineEnvironment($input, $output);
+        }
+        $this->waitForEnvironmentProvisioning($application);
+        $output->writeln(sprintf('Using Cloud Application <options=bold>%s</>', $application->name));
+        return $this->promptChooseEnvironmentConsiderProd($this->cloudApiClientService->getClient(), $application->uuid, false, false);
+    }
+
+    /**
+     * Applications cannot be created through the Cloud Platform API, only
+     * through an Acquia trial (see TrialsCreateCommand), so offer that to
+     * accounts with no applications and to anyone passing --new.
+     *
+     * @return \AcquiaCloudApi\Response\ApplicationResponse|null The newly
+     *     created application, or null when the normal select-an-existing-
+     *     application flow should run instead.
+     * @throws \Acquia\Cli\Exception\AcquiaCliException
+     */
+    private function maybeCreateTrialApplication(InputInterface $input): ?ApplicationResponse
+    {
+        if ($input->getArgument('environmentId')) {
+            return null;
+        }
+        $applications = new Applications($this->cloudApiClientService->getClient());
+        $existing = [];
+        foreach ($applications->getAll() as $application) {
+            $existing[] = $application->uuid;
+        }
+        if ($existing !== [] && !$input->getOption('new')) {
+            // The application picker offers creating a new one too.
+            return null;
+        }
+        if ($existing === [] && !$input->getOption('new')) {
+            if (!$input->isInteractive()) {
+                throw new AcquiaCliException('Your account has no Cloud applications yet. Create one with a free trial first: re-run with `acli dev:init --new`, run `acli trials:create`, or run `acli dev:init` interactively.');
+            }
+            $this->io->writeln([
+                "You don't have any Cloud applications yet — let's create one with a free Acquia Cloud Platform trial (14 days, no credit card required).",
+                'The trial provisions a new application with Dev, Stage, and Prod environments and a ready-to-use Drupal site.',
+            ]);
+            if (!$this->io->confirm('Create a free trial now?')) {
+                throw new AcquiaCliException('There is nothing to set up without an application. Re-run `acli dev:init` when you are ready to create one.');
+            }
+        }
+        return $this->createTrialApplication($existing);
+    }
+
+    /**
+     * Extend the standard application picker with a create-a-new-application
+     * choice, so the trial path is not gated on having zero applications or
+     * knowing about --new.
+     */
+    protected function promptChooseApplication(Client $acquiaCloudClient): object|array|null
+    {
+        $existing = iterator_to_array((new Applications($acquiaCloudClient))->getAll());
+        $choices = $existing;
+        $choices[] = (object) [
+            'name' => 'Create a new application (free 14-day Acquia trial)',
+            'uuid' => self::NEW_APPLICATION_CHOICE,
+        ];
+        $application = $this->promptChooseFromObjectsOrArrays($choices, 'uuid', 'name', 'Select a Cloud Platform application:');
+        if ($application->uuid !== self::NEW_APPLICATION_CHOICE) {
+            return $application;
+        }
+        $application = $this->createTrialApplication(array_map(static fn (object $app): string => $app->uuid, $existing));
+        // The caller goes straight to environment selection, so the new
+        // application's environments must exist by the time we return.
+        $this->waitForEnvironmentProvisioning($application);
+        return $application;
+    }
+
+    /**
+     * Create a trial via `acli trials:create`, then watch the Cloud API for
+     * an application that was not there before.
+     *
+     * @param string[] $existingUuids
+     * @throws \Acquia\Cli\Exception\AcquiaCliException
+     */
+    private function createTrialApplication(array $existingUuids): ApplicationResponse
+    {
+        // Run the sub-command non-interactively so the trial is created with
+        // sensible defaults; `acli trials:create` can be run directly to
+        // choose the site name, template, or region.
+        $trialsInput = new ArrayInput(['command' => 'trials:create']);
+        $trialsInput->setInteractive(false);
+        $exitCode = $this->getApplication()->find('trials:create')->run($trialsInput, $this->output);
+        if ($exitCode !== Command::SUCCESS) {
+            throw new AcquiaCliException('Trial creation failed.');
+        }
+        $applications = new Applications($this->cloudApiClientService->getClient());
+        return $this->pollCloud(
+            function () use ($applications, $existingUuids): ?ApplicationResponse {
+                foreach ($applications->getAll() as $application) {
+                    if (!in_array($application->uuid, $existingUuids, true)) {
+                        $this->io->writeln("✓ Found your new application <options=bold>$application->name</>");
+                        return $application;
+                    }
+                }
+                return null;
+            },
+            'Waiting for your new application to appear in the Cloud API.',
+            'The trial exists but its application has not appeared yet. Re-run `acli dev:init` in a minute to continue where you left off.'
+        );
+    }
+
+    /**
+     * A fresh trial application's environments can take a few minutes to
+     * provision; wait until one is cloneable before continuing.
+     *
+     * @throws \Acquia\Cli\Exception\AcquiaCliException
+     */
+    private function waitForEnvironmentProvisioning(ApplicationResponse $application): void
+    {
+        $environments = new Environments($this->cloudApiClientService->getClient());
+        $this->pollCloud(
+            static function () use ($environments, $application): ?object {
+                foreach ($environments->getAll($application->uuid) as $environment) {
+                    if (!$environment->flags->production && !empty($environment->vcs->url)) {
+                        return $environment;
+                    }
+                }
+                return null;
+            },
+            'Your environments are still being provisioned — this can take a few minutes. Checking every few seconds.',
+            'Your application exists, but its environments are still being provisioned. Re-run `acli dev:init` in a few minutes to continue where you left off.'
+        );
     }
 
     /**
