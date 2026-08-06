@@ -198,11 +198,12 @@ final class TrialsCreateCommand extends CommandBase
         if ($response->getStatusCode() === 404 && $method === 'GET') {
             return null;
         }
-        $data = json_decode((string) $response->getBody());
+        $body = (string) $response->getBody();
+        $data = json_decode($body);
         if ($response->getStatusCode() >= 400) {
             throw new AcquiaCliException('Trials service error (HTTP {code}): {message}', [
                 'code' => $response->getStatusCode(),
-                'message' => $data->message ?? $data->error ?? (string) $response->getBody(),
+                'message' => $data->message ?? $data->error ?? $body,
             ]);
         }
         return is_object($data) ? $data : null;

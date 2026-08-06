@@ -306,6 +306,17 @@ class TrialsCreateCommandTest extends CommandTestBase
         $this->executeCommand([], [], OutputInterface::VERBOSITY_NORMAL, false);
     }
 
+    public function testTrialsServiceErrorPrefersMessageOverError(): void
+    {
+        $this->mockTrialsToken();
+        $this->httpClientProphecy->request('GET', self::$trialsUrl . '/api/trials', Argument::any())
+            ->willReturn(self::response(400, ['error' => 'error-field', 'message' => 'message-field']))
+            ->shouldBeCalled();
+        $this->expectException(AcquiaCliException::class);
+        $this->expectExceptionMessage('Trials service error (HTTP 400): message-field');
+        $this->executeCommand([], [], OutputInterface::VERBOSITY_NORMAL, false);
+    }
+
     public function testTrialsServiceErrorWithoutMessage(): void
     {
         $this->mockTrialsToken();

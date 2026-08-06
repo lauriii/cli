@@ -25,10 +25,13 @@
             ".*sleep\\(\\$delay\\).*",
             ".*\\$delay = .*",
             ".*getenv\\('ACLI_TRIAL_TIMEOUT'\\).*",
-            // Reverting this to private would break only SetupCommand's
-            // override dispatch, which SetupCommandTest asserts — but the
+            // Reverting this to private would break only DevInitCommand's
+            // override dispatch, which DevInitCommandTest asserts — but the
             // covering tests of this base line cannot be attributed to it.
-            ".*protected function promptChooseApplication.*"
+            ".*protected function promptChooseApplication.*",
+            // Removing this cast is behaviorally equivalent: PSR-7 streams
+            // are cast back to strings wherever the value is consumed.
+            ".*\\(string\\) \\$response->getBody\\(\\).*"
         ]
     },
     "timeout": 30,
